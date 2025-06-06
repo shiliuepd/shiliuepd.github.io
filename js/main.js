@@ -1,9 +1,7 @@
 let bleDevice, gattServer;
 let epdService, epdCharacteristic;
-let reconnectTrys = 0;
-
-let canvas, ctx;
-let startTime;
+let startTime, msgIndex, appVersion;
+let canvas, ctx, textDecoder;
 
 const EpdCmd = {
   SET_PINS:  0x00,
@@ -16,6 +14,8 @@ const EpdCmd = {
 
   SET_TIME:  0x20,
 
+  WRITE_IMG: 0x30, // v1.6
+
   SET_CONFIG: 0x90,
   SYS_RESET:  0x91,
   SYS_SLEEP:  0x92,
@@ -26,22 +26,8 @@ function resetVariables() {
   gattServer = null;
   epdService = null;
   epdCharacteristic = null;
+  msgIndex = 0;
   document.getElementById("log").value = '';
-}
-
-async function handleError(error) {
-  console.error(error);
-  resetVariables();
-  if (bleDevice == null)
-    return;
-  if (reconnectTrys <= 5) {
-    reconnectTrys++;
-    await connect();
-  }
-  else {
-    addLog("连接失败！");
-    reconnectTrys = 0;
-  }
 }
 
 async function write(cmd, data, withResponse=true) {
@@ -55,7 +41,7 @@ async function write(cmd, data, withResponse=true) {
     if (data instanceof Uint8Array) data = Array.from(data);
     payload.push(...data)
   }
-  addLog(`<span class="action">⇑</span> ${bytes2hex(payload)}`);
+  addLog(bytes2hex(payload), '⇑');
   try {
     if (withResponse)
       await epdCharacteristic.writeValueWithResponse(Uint8Array.from(payload));
@@ -63,7 +49,7 @@ async function write(cmd, data, withResponse=true) {
       await epdCharacteristic.writeValueWithoutResponse(Uint8Array.from(payload));
   } catch (e) {
     console.error(e);
-    if (e.message) addLog(e.message);
+    if (e.message) addLog("write: " + e.message);
     return false;
   }
   return true;
@@ -93,6 +79,32 @@ async function epdWrite(cmd, data) {
   }
 }
 
+async function epdWriteImage(step = 'bw') {
+  const data = canvas2bytes(canvas, step);
+  const chunkSize = document.getElementById('mtusize').value - 2;
+  const interleavedCount = document.getElementById('interleavedcount').value;
+  const count = Math.round(data.length / chunkSize);
+  let chunkIdx = 0;
+  let noReplyCount = interleavedCount;
+
+  for (let i = 0; i < data.length; i += chunkSize) {
+    let currentTime = (new Date().getTime() - startTime) / 1000.0;
+    setStatus(`${step == 'bw' ? '黑白' : '红色'}块: ${chunkIdx+1}/${count+1}, 总用时: ${currentTime}s`);
+    const payload = [
+      (step == 'bw' ? 0x0F : 0x00) | ( i == 0 ? 0x00 : 0xF0),
+      ...data.slice(i, i + chunkSize),
+    ];
+    if (noReplyCount > 0) {
+      await write(EpdCmd.WRITE_IMG, payload, false);
+      noReplyCount--;
+    } else {
+      await write(EpdCmd.WRITE_IMG, payload, true);
+      noReplyCount = interleavedCount;
+    }
+    chunkIdx++;
+  }
+}
+
 async function setDriver() {
   await write(EpdCmd.SET_PINS, document.getElementById("epdpins").value);
   await write(EpdCmd.INIT, document.getElementById("epddriver").value);
@@ -110,12 +122,15 @@ async function syncTime(mode) {
   ]);
   if(await write(EpdCmd.SET_TIME, data)) {
     addLog("时间已同步！");
+    addLog("屏幕刷新完成前请不要操作。");
   }
 }
 
 async function clearScreen() {
   if(confirm('确认清除屏幕内容?')) {
     await write(EpdCmd.CLEAR);
+    addLog("清屏指令已发送！");
+    addLog("屏幕刷新完成前请不要操作。");
   }
 }
 
@@ -131,20 +146,19 @@ async function sendimg() {
   const driver = document.getElementById("epddriver").value;
   const mode = document.getElementById('dithering').value;
 
-  if (mode === '') {
-    alert('请选择一种取模算法！');
-    return;
-  }
-
   startTime = new Date().getTime();
   status.parentElement.style.display = "block";
 
-  if (mode.startsWith('bwr')) {
-    const invert = (driver === '02') || (driver === '05');
-    await epdWrite(driver === "02" ? 0x24 : 0x10, canvas2bytes(canvas, 'bw'));
-    await epdWrite(driver === "02" ? 0x26 : 0x13, canvas2bytes(canvas, 'red', invert));
+  if (appVersion < 0x16) {
+    if (mode.startsWith('bwr')) {
+      await epdWrite(driver === "02" ? 0x24 : 0x10, canvas2bytes(canvas, 'bw'));
+      await epdWrite(driver === "02" ? 0x26 : 0x13, canvas2bytes(canvas, 'red', driver === '02'));
+    } else {
+      await epdWrite(driver === "04" ? 0x24 : 0x13, canvas2bytes(canvas, 'bw'));
+    }
   } else {
-    await epdWrite(driver === "04" ? 0x24 : 0x13, canvas2bytes(canvas, 'bw'));
+    await epdWriteImage('bw');
+    if (mode.startsWith('bwr')) await epdWriteImage('red');
   }
 
   await write(EpdCmd.REFRESH);
@@ -152,6 +166,7 @@ async function sendimg() {
   const sendTime = (new Date().getTime() - startTime) / 1000.0;
   addLog(`发送完成！耗时: ${sendTime}s`);
   setStatus(`发送完成！耗时: ${sendTime}s`);
+  addLog("屏幕刷新完成前请不要操作。");
   setTimeout(() => {
     status.parentElement.style.display = "none";
   }, 5000);
@@ -183,16 +198,15 @@ async function preConnect() {
     }
   }
   else {
-    reconnectTrys = 0;
+    resetVariables();
     try {
       bleDevice = await navigator.bluetooth.requestDevice({
         optionalServices: ['62750001-d828-918d-fb46-b6c11c675aec'],
-        filters: [{ namePrefix: 'NRF_EPD' }]
-        //acceptAllDevices: true
+        acceptAllDevices: true
       });
     } catch (e) {
       console.error(e);
-      if (e.message) addLog(e.message);
+      if (e.message) addLog("requestDevice: " + e.message);
       addLog("请检查蓝牙是否已开启，且使用的浏览器支持蓝牙！建议使用以下浏览器：");
       addLog("• 电脑: Chrome/Edge");
       addLog("• Android: Chrome/Edge");
@@ -201,16 +215,11 @@ async function preConnect() {
     }
 
     await bleDevice.addEventListener('gattserverdisconnected', disconnect);
-    try {
-      await connect();
-    } catch (e) {
-      await handleError(e);
-    }
+    setTimeout(async function () { await connect(); }, 300);
   }
 }
 
 async function reConnect() {
-  reconnectTrys = 0;
   if (bleDevice != null && bleDevice.gatt.connected)
     bleDevice.gatt.disconnect();
   resetVariables();
@@ -218,50 +227,96 @@ async function reConnect() {
   setTimeout(async function () { await connect(); }, 300);
 }
 
-async function connect() {
-  if (epdCharacteristic == null && bleDevice != null) {
-    addLog("正在连接: " + bleDevice.name);
+function handleNotify(value, idx) {
+  const data = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (idx == 0) {
+    addLog(`收到配置：${bytes2hex(data)}`);
+    const epdpins = document.getElementById("epdpins");
+    const epddriver = document.getElementById("epddriver");
+    epdpins.value = bytes2hex(data.slice(0, 7));
+    if (data.length > 10) epdpins.value += bytes2hex(data.slice(10, 11));
+    epddriver.value = bytes2hex(data.slice(7, 8));
+    filterDitheringOptions();
+  } else {
+    if (textDecoder == null) textDecoder = new TextDecoder();
+    addLog(textDecoder.decode(data), '⇓');
+  }
+}
 
+async function connect() {
+  if (bleDevice == null || epdCharacteristic != null) return;
+
+  try {
+    addLog("正在连接: " + bleDevice.name);
     gattServer = await bleDevice.gatt.connect();
     addLog('  找到 GATT Server');
-
     epdService = await gattServer.getPrimaryService('62750001-d828-918d-fb46-b6c11c675aec');
     addLog('  找到 EPD Service');
-
     epdCharacteristic = await epdService.getCharacteristic('62750002-d828-918d-fb46-b6c11c675aec');
     addLog('  找到 Characteristic');
+  } catch (e) {
+    console.error(e);
+    if (e.message) addLog("connect: " + e.message);
+    disconnect();
+    return;
+  }
 
+  try {
+    const versionCharacteristic = await epdService.getCharacteristic('62750003-d828-918d-fb46-b6c11c675aec');
+    const versionData = await versionCharacteristic.readValue();
+    appVersion = versionData.getUint8(0);
+    addLog(`固件版本: 0x${appVersion.toString(16)}`);
+  } catch (e) {
+    console.error(e);
+    appVersion = 0x15;
+  }
+
+  try {
     await epdCharacteristic.startNotifications();
     epdCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
-      addLog(`<span class="action">⇓</span> ${bytes2hex(event.target.value.buffer)}`);
-      document.getElementById("epdpins").value = bytes2hex(event.target.value.buffer.slice(0, 7));
-      document.getElementById("epddriver").value = bytes2hex(event.target.value.buffer.slice(7, 8));
-      filterDitheringOptions();
+      handleNotify(event.target.value, msgIndex++);
     });
-
-    await write(EpdCmd.INIT);
-
-    document.getElementById("connectbutton").innerHTML = '断开';
-    updateButtonStatus();
+  } catch (e) {
+    console.error(e);
+    if (e.message) addLog("startNotifications: " + e.message);
   }
+
+  await write(EpdCmd.INIT);
+
+  document.getElementById("connectbutton").innerHTML = '断开';
+  updateButtonStatus();
 }
 
 function setStatus(statusText) {
   document.getElementById("status").innerHTML = statusText;
 }
 
-function addLog(logTXT) {
+function addLog(logTXT, action = '') {
   const log = document.getElementById("log");
   const now = new Date();
   const time = String(now.getHours()).padStart(2, '0') + ":" +
          String(now.getMinutes()).padStart(2, '0') + ":" +
          String(now.getSeconds()).padStart(2, '0') + " ";
-  log.innerHTML += '<span class="time">' + time + '</span>' + logTXT + '<br>';
+
+  const logEntry = document.createElement('div');
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'time';
+  timeSpan.textContent = time;
+  logEntry.appendChild(timeSpan);
+  
+  if (action !== '') {
+    const actionSpan = document.createElement('span');
+    actionSpan.className = 'action';
+    actionSpan.innerHTML = action;
+    logEntry.appendChild(actionSpan);
+  }
+  logEntry.appendChild(document.createTextNode(logTXT));
+
+  log.appendChild(logEntry);
   log.scrollTop = log.scrollHeight;
-  while ((log.innerHTML.match(/<br>/g) || []).length > 20) {
-    var logs_br_position = log.innerHTML.search("<br>");
-    log.innerHTML = log.innerHTML.substring(logs_br_position + 4);
-    log.scrollTop = log.scrollHeight;
+  
+  while (log.childNodes.length > 20) {
+    log.removeChild(log.firstChild);
   }
 }
 
@@ -287,16 +342,15 @@ function intToHex(intIn) {
   return stringOut.substring(2, 4) + stringOut.substring(0, 2);
 }
 
-async function update_image() {
-  let image = new Image();;
+async function update_image(clear = false) {
   const image_file = document.getElementById('image_file');
-  if (image_file.files.length > 0) {
-    const file = image_file.files[0];
-    image.src = URL.createObjectURL(file);
-  } else {
-    image.src = document.getElementById('demo-img').src;
-  }
+  if (image_file.files.length == 0) return;
 
+  if (clear) clear_canvas();
+
+  const file = image_file.files[0];
+  let image = new Image();;
+  image.src = URL.createObjectURL(file);
   image.onload = function(event) {
     URL.revokeObjectURL(this.src);
     ctx.drawImage(image, 0, 0, image.width, image.height, 0, 0, canvas.width, canvas.height);
@@ -305,10 +359,12 @@ async function update_image() {
 }
 
 function clear_canvas() {
-  if(confirm('确认清除画布内容?')) {
+  if (confirm('清除画布已有内容?')) {
     ctx.fillStyle = 'white';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return true;
   }
+  return false;
 }
 
 function convert_dithering() {
@@ -325,17 +381,23 @@ function convert_dithering() {
 function filterDitheringOptions() {
   const driver = document.getElementById('epddriver').value;
   const dithering = document.getElementById('dithering');
+  let currentOptionStillValid = false;
+  let lastValidOptionValue = null;
+
   for (let optgroup of dithering.getElementsByTagName('optgroup')) {
     const drivers = optgroup.getAttribute('data-driver').split('|');
     const show = drivers.includes(driver);
     for (option of optgroup.getElementsByTagName('option')) {
-      if (show)
+      if (show) {
         option.removeAttribute('disabled');
-      else
+        if (option.value == dithering.value) currentOptionStillValid = true;
+        lastValidOptionValue = option.value;
+      } else {
         option.setAttribute('disabled', 'disabled');
+      }
     }
   }
-  dithering.value = '';
+  if (!currentOptionStillValid) dithering.value = lastValidOptionValue;
 }
 
 function checkDebugMode() {
@@ -356,12 +418,13 @@ function checkDebugMode() {
 }
 
 document.body.onload = () => {
+  textDecoder = null;
   canvas = document.getElementById('canvas');
   ctx = canvas.getContext("2d");
 
-  updateButtonStatus();
-  update_image();
-  filterDitheringOptions();
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+  updateButtonStatus();
   checkDebugMode();
 }

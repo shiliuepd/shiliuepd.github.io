@@ -106,6 +106,7 @@ body.debug-mode fieldset legend {
     font-weight: 400;
     line-height: 1.5;
     box-sizing: border-box;
+    overflow: hidden;
 }
 
 .footer {
@@ -214,17 +215,31 @@ code {
     margin: 0;
     padding: 5px;
     background: #DDD;
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
     font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
     box-sizing: border-box;
+    word-break: break-word;
+}
+
+#log div {
+    padding: 2px 0;
+}
+
+#log .time,
+#log .action {
+    display: inline-block;
+    white-space: nowrap;
 }
 
 #log .time {
     color: #333;
+    margin-right: 0.5em;
 }
 
 #log .action {
     color: #666;
+    margin-right: 0.5em;
 }
 
 #canvas-box {
@@ -333,9 +348,85 @@ label {
     border-bottom: 1px dotted #AAA;
 }
 
+canvas.text-placement-mode {
+    border: 2px dashed var(--primary-color) !important;
+    cursor: text !important; /* Force text cursor */
+}
+
+.canvas-title {
+    display: none;
+    text-align: center;
+    margin-bottom: 5px;
+    color: var(--primary-color);
+}
+
+.canvas-tools {
+    margin-top: 10px;
+    justify-content: center;
+}
+
+.text-tools {
+    display: none;
+}
+
+.tool-button {
+    width: 36px;
+    height: 36px;
+    font-size: 1.2rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 5px;
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 0;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.tool-button:hover {
+    background-color: #e9ecef;
+    border-color: #ced4da;
+}
+
+.tool-button.active {
+    background-color: var(--primary-color);
+    color: white;
+    border-color: var(--primary-color);
+}
+
+body.debug-mode .tool-button {
+    background-color: var(--dark-input-bg);
+    border-color: var(--dark-border);
+    color: var(--dark-text);
+}
+
+body.debug-mode .tool-button:hover {
+    background-color: #3a3a3a;
+    border-color: #444;
+}
+
+body.debug-mode .tool-button.active {
+    background-color: var(--primary-color);
+    color: white;
+    border-color: var(--primary-hover);
+}
+
 @media (max-width: 768px) {
     .flex-container {
         flex-direction: column;
+    }
+
+    .canvas-tools.flex-container {
+        flex-direction: row;
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+
+    .canvas-tools .flex-group {
+        justify-content: center;
+        width: 100%;
     }
 
     .left-controls,
